@@ -91,7 +91,7 @@ FINAL COMMAND: THINK INTERNALLY. SOLVE CAREFULLY. OUTPUT ONLY THE FINAL ANSWER. 
   host.style.cssText = `
     position: fixed;
     inset: 0;
-    z-index: 2147483647;
+    z-index: 999999;
     pointer-events: none;
   `;
   document.documentElement.appendChild(host);
