@@ -1,68 +1,47 @@
+// Vercel serverless function - GROQ proxy
+// Reads API keys from GROQ_KEYS env var (comma-separated)
+
 export default async function handler(req, res) {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const { text, type } = req.body || {};
-  if (!text || typeof text !== 'string') {
+  const { text, prompt, model: requestedModel } = req.body || {};
+  const promptText = text || prompt;
+
+  if (!promptText || typeof promptText !== 'string') {
     return res.status(400).json({ error: 'Missing text' });
   }
 
-  // Read API keys from environment variable (comma-separated)
-  // Set GROQ_KEYS env var in Vercel project settings
-  const API_KEYS = (process.env.GROQ_KEYS || '').split(',').filter(k => k.trim()).map(k => k.trim());
+  // Get API keys from env var (set GROQ_KEYS as comma-separated in Vercel)
+  const keysEnv = process.env.GROQ_KEYS || '';
+  const API_KEYS = keysEnv.split(',').map(k => k.trim()).filter(Boolean);
 
   if (API_KEYS.length === 0) {
-    return res.status(500).json({ error: 'No GROQ API keys configured' });
+    return res.status(500).json({ error: 'No GROQ API keys configured. Set GROQ_KEYS env var.' });
   }
 
-  const MODELS = ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+  // Model priority with correct Groq model IDs
+  const MODELS = requestedModel
+    ? [requestedModel]
+    : ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+
   const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-
-  const SYSTEM_PROMPT = `ROLE: You are a highly accurate educational question-solving assistant.
-
-CORE BEHAVIOR:
-- Read and understand the ENTIRE input before answering.
-- Identify the question type automatically.
-- Think and solve internally.
-- DO NOT output reasoning.
-- DO NOT output chain-of-thought.
-- DO NOT output analysis.
-- DO NOT describe your solving process.
-- Output ONLY the final answer required by the question.
-- Accuracy is more important than speed.
-- Never guess when the information is genuinely insufficient.
-- If the question is unreadable or fundamentally ambiguous, output exactly: UNCERTAIN
-
-OUTPUT RULES:
-- Never repeat the question.
-- Never write an introduction.
-- Never write a conclusion.
-- Never write "The answer is..."
-- Never write "Answer:"
-- Never write "Đáp án:"
-- Never write explanations unless explicitly requested.
-- Never output emojis.
-- Never use markdown.
-- Never use bullet points.
-- Never use quotation marks around the answer.
-- Never append commentary after the final answer.
-- Never append confidence statements.
-- Never append extra whitespace.
-- Preserve the original order of answers.
-
-MCQ FORMAT: Return ONLY the option letter (A/B/C/D). Multiple: letters separated by space.
-TRUE/FALSE FORMAT: Use ONLY: Đ = ĐÚNG, S = SAI. Multiple: separated by space.
-WORD FORM FORMAT: Return ONLY the completed word. No punctuation, no explanation.
-VERB FORM FORMAT: Return ONLY the required verb form.
-
-FINAL COMMAND: THINK INTERNALLY. SOLVE CAREFULLY. OUTPUT ONLY THE FINAL ANSWER. NO REASONING. NO EXPLANATION. NO EXTRA TEXT.`;
 
   let lastError = null;
 
   for (const model of MODELS) {
     for (let attempt = 0; attempt < API_KEYS.length; attempt++) {
-      const apiKey = API_KEYS[Math.floor(Math.random() * API_KEYS.length)];
+      const apiKey = API_KEYS[attempt];
       try {
         const groqRes = await fetch(GROQ_URL, {
           method: 'POST',
@@ -73,15 +52,25 @@ FINAL COMMAND: THINK INTERNALLY. SOLVE CAREFULLY. OUTPUT ONLY THE FINAL ANSWER. 
           body: JSON.stringify({
             model: model,
             messages: [
-              { role: 'system', content: SYSTEM_PROMPT },
-              { role: 'user', content: text }
+              { role: 'user', content: promptText }
             ],
             temperature: 0.1,
-            max_tokens: 512,
+            max_tokens: 256,
           }),
         });
 
-        if (groqRes.status === 429 || groqRes.status === 403 || groqRes.status >= 500) {
+        if (groqRes.status === 429 || groqRes.status === 403) {
+          lastError = `HTTP ${groqRes.status}`;
+          continue;
+        }
+
+        if (groqRes.status === 400) {
+          const errData = await groqRes.json().catch(() => ({}));
+          lastError = `HTTP 400: ${JSON.stringify(errData)}`;
+          continue;
+        }
+
+        if (groqRes.status >= 500) {
           lastError = `HTTP ${groqRes.status}`;
           continue;
         }
@@ -92,21 +81,22 @@ FINAL COMMAND: THINK INTERNALLY. SOLVE CAREFULLY. OUTPUT ONLY THE FINAL ANSWER. 
           continue;
         }
 
-        const groqData = await groqRes.json();
-        let answer = '';
-        if (groqData.choices && groqData.choices[0] && groqData.choices[0].message) {
-          answer = groqData.choices[0].message.content;
-          if (answer.includes('===ANSWER===')) {
-            answer = answer.split('===ANSWER===')[1].trim();
-          }
+        const data = await groqRes.json();
+
+        if (!data.choices || !data.choices[0]) {
+          lastError = 'No choices in response';
+          continue;
         }
 
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        let content = data.choices[0].message?.content || '';
+
+        // Extract answer after ===ANSWER=== if present
+        if (content.includes('===ANSWER===')) {
+          content = content.split('===ANSWER===')[1].trim();
+        }
 
         return res.status(200).json({
-          answer: answer,
+          answer: content,
           model: model,
         });
       } catch (e) {
@@ -116,6 +106,7 @@ FINAL COMMAND: THINK INTERNALLY. SOLVE CAREFULLY. OUTPUT ONLY THE FINAL ANSWER. 
     }
   }
 
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  return res.status(500).json({ error: `All keys and models failed. Last error: ${lastError}` });
+  return res.status(500).json({
+    error: `All keys and models failed. Last error: ${lastError}`
+  });
 }
