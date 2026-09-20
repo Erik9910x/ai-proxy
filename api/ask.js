@@ -33,7 +33,7 @@ export default async function handler(req, res) {
   // Model priority with correct Groq model IDs
   const MODELS = requestedModel
     ? [requestedModel]
-    : ['openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
+    : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'];
 
   const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
